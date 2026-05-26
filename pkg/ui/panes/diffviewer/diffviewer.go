@@ -300,6 +300,9 @@ func diffFile(node *cachedNode, width int, sideBySide bool) tea.Cmd {
 		}
 		if useSideBySide {
 			args = append(args, "--side-by-side")
+		} else if sideBySide {
+			// SBS was requested but disabled for new/deleted files — keep line numbers visible.
+			args = append(args, "--line-numbers")
 		}
 		deltac := exec.Command("delta", args...)
 		deltac.Env = os.Environ()
