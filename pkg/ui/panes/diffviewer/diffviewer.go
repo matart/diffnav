@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
@@ -306,12 +308,12 @@ func diffFile(node *cachedNode, width int, sideBySide bool) tea.Cmd {
 		}
 		deltac := exec.Command("delta", args...)
 		deltac.Env = os.Environ()
-		deltac.Stdin = strings.NewReader(file.String() + "\n")
+		deltac.Stdin = strings.NewReader(injectPHPOpenTag(filenode.GetFileName(file), file.String()) + "\n")
 		out, err := deltac.Output()
 		if err != nil {
 			return common.ErrMsg{Err: err}
 		}
-		return diffContentMsg{cacheKey: key, text: string(out)}
+		return diffContentMsg{cacheKey: key, text: stripPHPSyntheticLines(string(out))}
 	}
 }
 
@@ -344,7 +346,7 @@ func diffDir(dir *cachedNode, width int, sideBySide bool, preamble string) tea.C
 		deltac.Env = os.Environ()
 		strs := strings.Builder{}
 		for _, file := range dir.files {
-			strs.WriteString(file.String())
+			strs.WriteString(injectPHPOpenTag(filenode.GetFileName(file), file.String()))
 		}
 		deltac.Stdin = strings.NewReader(strs.String() + "\n")
 		out, err := deltac.Output()
@@ -352,7 +354,7 @@ func diffDir(dir *cachedNode, width int, sideBySide bool, preamble string) tea.C
 			return common.ErrMsg{Err: err}
 		}
 
-		text := string(out)
+		text := stripPHPSyntheticLines(string(out))
 		if preamble != "" {
 			text = renderPreamble(preamble) + "\n" + text
 		}
@@ -395,6 +397,79 @@ func renderPreamble(preamble string) string {
 type diffContentMsg struct {
 	cacheKey string
 	text     string
+}
+
+// PHP's syntect grammar starts in HTML mode and only enters PHP scope after `<?php`/`<?=`.
+// When the diff body doesn't include that tag, delta can't highlight keywords. Inject `<?php`
+// as a synthetic context line at the start of the first hunk, shift the hunk start line down
+// by 1 to keep real lines correctly numbered, and tag the line with a sentinel so it can be
+// stripped from delta's output before display.
+const phpSyntheticMarker = "diffnav_phpfix"
+
+var (
+	phpExtRegex     = regexp.MustCompile(`(?i)\.(php[3-7]?|phtml|phps|phpt)$`)
+	hunkHeaderRegex = regexp.MustCompile(`(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$`)
+)
+
+func injectPHPOpenTag(filename, body string) string {
+	if !phpExtRegex.MatchString(filename) {
+		return body
+	}
+	headers := hunkHeaderRegex.FindAllStringSubmatchIndex(body, -1)
+	if len(headers) == 0 {
+		return body
+	}
+	// Delta restarts syntect state per hunk, so each hunk needs its own `<?php`.
+	// Iterate in reverse so earlier indices stay valid as we splice.
+	for i := len(headers) - 1; i >= 0; i-- {
+		loc := headers[i]
+		headerStart, headerEnd := loc[0], loc[1]
+		bodyEnd := len(body)
+		if i+1 < len(headers) {
+			bodyEnd = headers[i+1][0]
+		}
+		hunkBody := body[headerEnd:bodyEnd]
+		if strings.Contains(hunkBody, "<?php") || strings.Contains(hunkBody, "<?=") {
+			continue
+		}
+		srcStart, _ := strconv.Atoi(body[loc[2]:loc[3]])
+		srcCount := 1
+		if loc[4] != -1 {
+			srcCount, _ = strconv.Atoi(body[loc[4]:loc[5]])
+		}
+		dstStart, _ := strconv.Atoi(body[loc[6]:loc[7]])
+		dstCount := 1
+		if loc[8] != -1 {
+			dstCount, _ = strconv.Atoi(body[loc[8]:loc[9]])
+		}
+		context := body[loc[10]:loc[11]]
+		// Need to shift starts down by 1 so the stripped synthetic line doesn't
+		// throw off line numbers for real content. If we can't shift, skip.
+		if srcStart < 2 || dstStart < 2 {
+			continue
+		}
+		newHeader := fmt.Sprintf("@@ -%d,%d +%d,%d @@%s\n <?php /*%s*/",
+			srcStart-1, srcCount+1, dstStart-1, dstCount+1, context, phpSyntheticMarker)
+		body = body[:headerStart] + newHeader + body[headerEnd:]
+	}
+	return body
+}
+
+// stripPHPSyntheticLines removes the sentinel-tagged lines that injectPHPOpenTag
+// added before sending the diff to delta.
+func stripPHPSyntheticLines(output string) string {
+	if !strings.Contains(output, phpSyntheticMarker) {
+		return output
+	}
+	lines := strings.Split(output, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.Contains(ansi.Strip(line), phpSyntheticMarker) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 func (m *Model) ClearCache() {
