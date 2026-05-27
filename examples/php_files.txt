@@ -1,0 +1,73 @@
+diff --git a/src/Service/InvoiceService.php b/src/Service/InvoiceService.php
+index aaaaaaa..bbbbbbb 100644
+--- a/src/Service/InvoiceService.php
++++ b/src/Service/InvoiceService.php
+@@ -42,11 +42,14 @@ class InvoiceService
+      *
+      * @return Invoice[]
+      */
+-    public function findOverdue(int $daysOverdue): array
++    public function findOverdue(int $daysOverdue, ?string $tenantId = null): array
+     {
+         $cutoff = new \DateTimeImmutable(sprintf('-%d days', $daysOverdue));
+-        return $this->repository->findBy([
++        $criteria = [
+             'status' => Invoice::STATUS_UNPAID,
+             'dueDate' => ['$lt' => $cutoff],
+-        ]);
++        ];
++        if ($tenantId !== null) {
++            $criteria['tenantId'] = $tenantId;
++        }
++        return $this->repository->findBy($criteria);
+     }
+@@ -78,6 +81,13 @@ class InvoiceService
+         $invoice->setStatus(Invoice::STATUS_PAID);
+         $invoice->setPaidAt(new \DateTimeImmutable());
+         $this->repository->save($invoice);
++
++        $this->eventBus->dispatch(new InvoicePaid(
++            invoiceId: $invoice->getId(),
++            tenantId: $invoice->getTenantId(),
++            amount: $invoice->getAmount(),
++            paidAt: $invoice->getPaidAt(),
++        ));
+     }
+
+     private function calculateTax(float $subtotal, string $region): float
+diff --git a/src/Controller/HealthController.php b/src/Controller/HealthController.php
+index ccccccc..ddddddd 100644
+--- a/src/Controller/HealthController.php
++++ b/src/Controller/HealthController.php
+@@ -1,11 +1,15 @@
+ <?php
++declare(strict_types=1);
++
+ namespace App\Controller;
+
++use App\Service\HealthChecker;
+ use Symfony\Component\HttpFoundation\JsonResponse;
+
+ class HealthController
+ {
+-    public function check(): JsonResponse
++    public function __construct(private readonly HealthChecker $checker) {}
++    public function check(): JsonResponse
+     {
+-        return new JsonResponse(['status' => 'ok']);
++        return new JsonResponse(['status' => $this->checker->ping() ? 'ok' : 'degraded']);
+     }
+ }
+diff --git a/README.md b/README.md
+index eeeeeee..fffffff 100644
+--- a/README.md
++++ b/README.md
+@@ -10,5 +10,8 @@ A roofing platform.
+
+ ## Setup
+
+-Run `composer install` to get started.
++1. Run `composer install`.
++2. Copy `.env.example` to `.env`.
++3. Run database migrations: `php bin/console doctrine:migrations:migrate`.
++4. Start the dev server: `symfony server:start`.
