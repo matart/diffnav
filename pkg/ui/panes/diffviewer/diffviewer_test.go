@@ -159,18 +159,28 @@ func TestFindHunkHeaderLines(t *testing.T) {
 	}
 }
 
-func TestApplyReviewedMarkers_InjectsAboveReviewedHunks(t *testing.T) {
+func TestApplyReviewedMarkers_InsertsBelowReviewedHunkBox(t *testing.T) {
 	in := "───────────────┐\n10: foo │\n───────────────┘\n a\n───────────────┐\n50: bar │\n───────────────┘\n x"
 	out, offsets := applyReviewedMarkers(in, []bool{false, true}, -1)
-	// First hunk unchanged at line 0, second hunk pushed down by one marker line.
+	// Hunk offsets are unaffected because the marker for hunk 1 is inserted
+	// AFTER its bottom border, not before its top border.
 	if offsets[0] != 0 {
-		t.Fatalf("first hunk should still be at line 0, got %d", offsets[0])
+		t.Fatalf("first hunk should be at line 0, got %d", offsets[0])
 	}
-	if offsets[1] != 5 {
-		t.Fatalf("second hunk should be at line 5 (was 4, marker pushed it), got %d", offsets[1])
+	if offsets[1] != 4 {
+		t.Fatalf("second hunk should be at line 4, got %d", offsets[1])
 	}
 	if !strings.Contains(out, "✓ reviewed") {
 		t.Fatal("expected reviewed marker in output")
+	}
+	// The marker should appear after the second hunk's bottom border (line 6),
+	// before content " x".
+	lines := strings.Split(out, "\n")
+	if len(lines) < 9 {
+		t.Fatalf("expected at least 9 output lines, got %d", len(lines))
+	}
+	if !strings.Contains(lines[7], "✓ reviewed") {
+		t.Fatalf("expected marker on line 7, got %q", lines[7])
 	}
 }
 

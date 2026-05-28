@@ -590,10 +590,11 @@ func findHunkHeaderLines(content string) []int {
 	return positions
 }
 
-// applyReviewedMarkers inserts a "✓ reviewed" line above each hunk whose
-// corresponding mask entry is true, and restyles the current hunk's 3-line
-// header box (top border, title, bottom border) in bright cyan. Returns the
-// new content plus the line offsets of each hunk header in the new content.
+// applyReviewedMarkers inserts a "✓ reviewed" line immediately after each
+// reviewed hunk's bottom border (so it stays visible when the hunk is at the
+// top of the viewport) and restyles the current hunk's 3-line header box in
+// bright cyan. Returns the new content plus the line offsets of each hunk
+// header (top border position) in the new content.
 func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []int) {
 	offsets := findHunkHeaderLines(raw)
 	if len(offsets) == 0 {
@@ -615,9 +616,6 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 	hunkIdx := 0
 	for i, line := range lines {
 		if hunkIdx < len(offsets) && i == offsets[hunkIdx] {
-			if hunkIdx < len(mask) && mask[hunkIdx] {
-				out = append(out, marker)
-			}
 			newOffsets = append(newOffsets, len(out))
 			hunkIdx++
 		}
@@ -625,6 +623,13 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 			line = restyleCurrentHeaderLine(line, i-currentTop)
 		}
 		out = append(out, line)
+		// After the bottom border of a reviewed hunk, drop the marker.
+		if hunkIdx > 0 {
+			k := hunkIdx - 1
+			if i == offsets[k]+2 && k < len(mask) && mask[k] {
+				out = append(out, marker)
+			}
+		}
 	}
 	return strings.Join(out, "\n"), newOffsets
 }
@@ -642,9 +647,10 @@ func restyleCurrentHeaderLine(line string, row int) string {
 		}
 	case 1:
 		if strings.HasSuffix(stripped, "│") {
+			// Preserve delta's exact spacing so the title's `│` lands at the
+			// same column as the border's `┐` and `┘`.
 			body := strings.TrimSuffix(stripped, "│")
-			body = strings.TrimSpace(body)
-			return style.Render(" " + body + " │")
+			return style.Render(body + "│")
 		}
 	case 2:
 		if strings.HasSuffix(stripped, "┘") && len(stripped) > 1 {
