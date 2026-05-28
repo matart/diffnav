@@ -31,6 +31,9 @@ type FileNode struct {
 	Selected   bool
 	PanelWidth int
 	Cfg        config.Config
+	// ReviewedFn, if set, returns (reviewedHunkCount, totalHunkCount) for this
+	// file at render time so the badge stays fresh without rebuilding the tree.
+	ReviewedFn func(file *gitdiff.File) (int, int)
 }
 
 func (f *FileNode) Path() string {
@@ -60,29 +63,68 @@ func (f *FileNode) renderStandardLayout(name string) string {
 		stats = " " + ViewFileDiffStats(f.File, lipgloss.NewStyle())
 	}
 
-	nameMaxWidth := f.PanelWidth - f.Depth - iconWidth - lipgloss.Width(stats)
+	badge := f.reviewedBadge()
+	fullyReviewed := f.allHunksReviewed()
+	suffix := stats + badge
+
+	nameMaxWidth := f.PanelWidth - f.Depth - iconWidth - lipgloss.Width(suffix)
 	truncatedName := utils.TruncateString(name, nameMaxWidth)
 	coloredIcon := lipgloss.NewStyle().Foreground(f.StatusColor()).Render(icon)
+	if fullyReviewed {
+		coloredIcon = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(icon)
+	}
 
 	if f.Selected {
 		bgStyle := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(f.StatusColor())
+		if fullyReviewed {
+			bgStyle = bgStyle.Foreground(lipgloss.Color("8"))
+		}
 		if f.PanelWidth > 0 {
 			availableWidth := f.PanelWidth - iconWidth - f.Depth
 			if availableWidth > 0 {
 				bgStyle = bgStyle.Width(availableWidth)
 			}
 		}
-		return coloredIcon + bgStyle.Render(truncatedName) + stats
+		return coloredIcon + bgStyle.Render(truncatedName) + suffix
+	}
+
+	if fullyReviewed {
+		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+		return coloredIcon + dim.Render(truncatedName) + suffix
 	}
 
 	if f.Cfg.UI.ColorFileNames {
 		styledName := lipgloss.NewStyle().Foreground(f.StatusColor()).Render(truncatedName)
-		return coloredIcon + styledName + stats
+		return coloredIcon + styledName + suffix
 	}
 
-	return coloredIcon + truncatedName + stats
+	return coloredIcon + truncatedName + suffix
+}
+
+// reviewedBadge renders ` 3/7` (dim green) when some hunks are reviewed, or "" otherwise.
+func (f *FileNode) reviewedBadge() string {
+	if f.ReviewedFn == nil {
+		return ""
+	}
+	done, total := f.ReviewedFn(f.File)
+	if total == 0 || done == 0 {
+		return ""
+	}
+	color := lipgloss.Color("8")
+	if done == total {
+		color = lipgloss.Green
+	}
+	return " " + lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%d/%d", done, total))
+}
+
+func (f *FileNode) allHunksReviewed() bool {
+	if f.ReviewedFn == nil {
+		return false
+	}
+	done, total := f.ReviewedFn(f.File)
+	return total > 0 && done == total
 }
 
 // renderFullLayout renders: [status icon colored] [file-type icon colored] [filename]
@@ -91,16 +133,20 @@ func (f *FileNode) renderFullLayout(name string) string {
 	statusIcon := f.getStatusIcon()
 	fileIcon := icons.GetIcon(name, false)
 	style := lipgloss.NewStyle().Foreground(f.StatusColor())
+	if f.allHunksReviewed() {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	}
 
 	stats := ""
 	if f.Cfg.UI.ShowDiffStats {
 		stats = " " + ViewFileDiffStats(f.File, lipgloss.NewStyle())
 	}
+	suffix := stats + f.reviewedBadge()
 
 	iconsPrefix := style.Render(statusIcon) + " " + style.Render(fileIcon) + " "
 	iconsWidth := lipgloss.Width(statusIcon) + 1 + lipgloss.Width(fileIcon) + 1
 
-	nameMaxWidth := f.PanelWidth - f.Depth - iconsWidth - lipgloss.Width(stats)
+	nameMaxWidth := f.PanelWidth - f.Depth - iconsWidth - lipgloss.Width(suffix)
 	truncatedName := utils.TruncateString(name, nameMaxWidth)
 
 	if f.Selected {
@@ -110,16 +156,16 @@ func (f *FileNode) renderFullLayout(name string) string {
 				bgStyle = bgStyle.Width(w)
 			}
 		}
-		return iconsPrefix + bgStyle.Render(truncatedName) + stats
+		return iconsPrefix + bgStyle.Render(truncatedName) + suffix
 	}
 
 	if f.Cfg.UI.ColorFileNames {
-		return iconsPrefix + style.Render(truncatedName) + stats
+		return iconsPrefix + style.Render(truncatedName) + suffix
 	}
 	return iconsPrefix + lipgloss.NewStyle().
 		Foreground(lipgloss.Color("15")).
 		Render(truncatedName) +
-		stats
+		suffix
 }
 
 // getIcon returns the left icon based on the icon style.

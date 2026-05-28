@@ -22,9 +22,10 @@ import (
 )
 
 type Model struct {
-	t     tree.Model
-	files []*gitdiff.File
-	cfg   config.Config
+	t          tree.Model
+	files      []*gitdiff.File
+	cfg        config.Config
+	reviewedFn func(file *gitdiff.File) (int, int)
 }
 
 func New(cfg config.Config) Model {
@@ -210,8 +211,16 @@ func (m *Model) SetCursorByPath(path string) {
 	m.t.SetYOffset(yoffset)
 }
 
+// SetReviewedLookup sets the callback FileNodes consult at render time for
+// reviewed-hunk counts. The lookup is read on every render, so updating state
+// elsewhere takes effect without rebuilding the tree.
+func (m *Model) SetReviewedLookup(fn func(file *gitdiff.File) (int, int)) {
+	m.reviewedFn = fn
+	m.rebuildTree()
+}
+
 func (m *Model) rebuildTree() {
-	t := buildFullFileTree(m.files, m.cfg)
+	t := buildFullFileTree(m.files, m.cfg, m.reviewedFn)
 	t = collapseTree(t)
 	t, _ = truncateTree(t, 0, 0, 0, m.cfg, m.t.Width())
 	m.t.SetNodes(t)
@@ -233,7 +242,7 @@ func closeDirsBelow(node *tree.Node, maxOpenDepth int) {
 	}
 }
 
-func buildFullFileTree(files []*gitdiff.File, cfg config.Config) *tree.Node {
+func buildFullFileTree(files []*gitdiff.File, cfg config.Config, reviewedFn func(*gitdiff.File) (int, int)) *tree.Node {
 	t := tree.Root(&dirnode.DirNode{FullPath: "/", Name: constants.RootName})
 	for _, file := range files {
 		// start from the root
@@ -274,8 +283,9 @@ func buildFullFileTree(files []*gitdiff.File, cfg config.Config) *tree.Node {
 			var c *tree.Node
 			if i == len(parts)-1 {
 				node := &filenode.FileNode{
-					File: file,
-					Cfg:  cfg,
+					File:       file,
+					Cfg:        cfg,
+					ReviewedFn: reviewedFn,
 				}
 				subTree.Child(node)
 			} else {

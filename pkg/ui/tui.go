@@ -22,6 +22,7 @@ import (
 	"github.com/dlvhdr/diffnav/pkg/config"
 	"github.com/dlvhdr/diffnav/pkg/dirnode"
 	"github.com/dlvhdr/diffnav/pkg/filenode"
+	"github.com/dlvhdr/diffnav/pkg/reviewed"
 	"github.com/dlvhdr/diffnav/pkg/ui/common"
 	"github.com/dlvhdr/diffnav/pkg/ui/panes/diffviewer"
 	"github.com/dlvhdr/diffnav/pkg/ui/panes/filetree"
@@ -95,6 +96,7 @@ type mainModel struct {
 	pendingCursorPath string
 	watchInFlight     bool
 	repoRoot          string
+	reviewedState     *reviewed.State
 }
 
 func New(input string, cfg config.Config) mainModel {
@@ -135,7 +137,75 @@ func New(input string, cfg config.Config) mainModel {
 
 	m.resultsVp = viewport.Model{}
 
+	storageDir := reviewed.ResolvePath(cfg.Storage)
+	state, err := reviewed.Load(storageDir)
+	if err != nil {
+		log.Warn("failed to load reviewed state", "err", err, "dir", storageDir)
+	}
+	m.reviewedState = state
+
 	return m
+}
+
+func (m *mainModel) hunkIDsForFile(file *gitdiff.File) []string {
+	if file == nil {
+		return nil
+	}
+	ids := make([]string, len(file.TextFragments))
+	path := filenode.GetFileName(file)
+	for i, frag := range file.TextFragments {
+		ids[i] = reviewed.HunkID(path, frag)
+	}
+	return ids
+}
+
+func (m *mainModel) reviewedMaskForFile(file *gitdiff.File) []bool {
+	if file == nil || m.reviewedState == nil {
+		return nil
+	}
+	ids := m.hunkIDsForFile(file)
+	mask := make([]bool, len(ids))
+	for i, id := range ids {
+		mask[i] = m.reviewedState.IsReviewed(m.repoRoot, id)
+	}
+	return mask
+}
+
+// reviewedStatsForFile returns (reviewedHunks, totalHunks) for the badge.
+func (m *mainModel) reviewedStatsForFile(file *gitdiff.File) (int, int) {
+	if file == nil || m.reviewedState == nil {
+		return 0, 0
+	}
+	ids := m.hunkIDsForFile(file)
+	return m.reviewedState.CountReviewed(m.repoRoot, ids), len(ids)
+}
+
+func (m *mainModel) refreshReviewedMask() {
+	if m.reviewedState == nil {
+		return
+	}
+	file := m.diffViewer.CurrentFile()
+	m.diffViewer.SetReviewedMask(m.reviewedMaskForFile(file))
+}
+
+func (m *mainModel) toggleReviewedAtCursor() {
+	if m.reviewedState == nil {
+		return
+	}
+	file := m.diffViewer.CurrentFile()
+	if file == nil {
+		return
+	}
+	idx := m.diffViewer.CurrentHunkIndex()
+	if idx < 0 || idx >= len(file.TextFragments) {
+		return
+	}
+	id := reviewed.HunkID(filenode.GetFileName(file), file.TextFragments[idx])
+	m.reviewedState.Toggle(m.repoRoot, id)
+	if err := m.reviewedState.Save(); err != nil {
+		log.Warn("failed to save reviewed state", "err", err)
+	}
+	m.refreshReviewedMask()
 }
 
 type repoRootMsg string
@@ -262,6 +332,8 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, dfCmd)
 		case key.Matches(msg, keys.ToggleIconStyle):
 			m.cycleIconStyle()
+		case key.Matches(msg, keys.ToggleReviewed):
+			m.toggleReviewedAtCursor()
 		case key.Matches(msg, keys.ToggleDiffView):
 			m.sideBySide = !m.sideBySide
 			cmd = m.diffViewer.SetSideBySide(m.sideBySide)
@@ -356,6 +428,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case repoRootMsg:
 		m.repoRoot = string(msg)
+		m.refreshReviewedMask()
 
 	case watchResultMsg:
 		m.watchInFlight = false
@@ -380,6 +453,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.fileTree = m.fileTree.SetFiles(m.files)
+		m.fileTree.SetReviewedLookup(m.reviewedStatsForFile)
 		m.preamble = strings.TrimSpace(msg.preamble)
 		m.commitBranch = msg.branch
 		m.cachedMeta = m.parseCommitMeta()
@@ -1356,6 +1430,7 @@ func (m mainModel) setNodeDiff(node *tree.Node) (mainModel, tea.Cmd) {
 		m.diffViewer, cmd = m.diffViewer.SetDirPatch(fullPath, files)
 	}
 
+	m.refreshReviewedMask()
 	return m, cmd
 }
 

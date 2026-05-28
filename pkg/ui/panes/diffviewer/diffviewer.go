@@ -27,7 +27,11 @@ type cachedNode struct {
 	files     []*gitdiff.File
 	additions int64
 	deletions int64
-	diff      string
+	diff      string // viewport content (markers applied)
+	rawDiff   string // delta output (no markers)
+	// hunkOffsets[i] is the line index of fragment i's header top-border in the
+	// currently-displayed diff. Recomputed each time markers change.
+	hunkOffsets []int
 }
 
 type nodeCache map[string]*cachedNode
@@ -41,12 +45,13 @@ func cacheKey(path string, sideBySide bool) string {
 
 type Model struct {
 	common.Common
-	vp         viewport.Model
-	file       *cachedNode
-	dir        *cachedNode
-	cache      nodeCache
-	sideBySide bool
-	preamble   string
+	vp            viewport.Model
+	file          *cachedNode
+	dir           *cachedNode
+	cache         nodeCache
+	sideBySide    bool
+	preamble      string
+	reviewedMask  []bool // one bool per hunk in the current file (only used when file != nil)
 }
 
 // SetPreamble stores the preamble text (e.g. commit metadata from git show).
@@ -77,11 +82,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				lines[i] = ansi.Truncate(line, m.vp.Width(), "")
 			}
 		}
-		diff := strings.Join(lines, "\n")
-		if _, ok := m.cache[msg.cacheKey]; ok {
-			m.cache[msg.cacheKey].diff = diff
+		raw := strings.Join(lines, "\n")
+		mask := m.reviewedMask
+		if m.cache[msg.cacheKey] == nil || m.file == nil || m.cache[msg.cacheKey] != m.file {
+			mask = nil // mask only applies to the currently-active file
 		}
-		m.vp.SetContent(diff)
+		rendered, offsets := applyReviewedMarkers(raw, mask)
+		if n, ok := m.cache[msg.cacheKey]; ok {
+			n.rawDiff = raw
+			n.diff = rendered
+			n.hunkOffsets = offsets
+		}
+		m.vp.SetContent(rendered)
 	}
 
 	vp, vpCmd := m.vp.Update(msg)
@@ -397,6 +409,98 @@ func renderPreamble(preamble string) string {
 type diffContentMsg struct {
 	cacheKey string
 	text     string
+}
+
+// SetReviewedMask updates which hunks of the current file are marked reviewed and
+// re-renders the viewport. mask is indexed by fragment position in file.TextFragments.
+func (m *Model) SetReviewedMask(mask []bool) {
+	m.reviewedMask = mask
+	if m.file == nil || m.file.rawDiff == "" {
+		return
+	}
+	rendered, offsets := applyReviewedMarkers(m.file.rawDiff, mask)
+	m.file.diff = rendered
+	m.file.hunkOffsets = offsets
+	m.vp.SetContent(rendered)
+}
+
+// CurrentHunkIndex returns the index of the topmost-passed hunk in the displayed
+// content (the hunk the user is currently reading). Returns -1 if not viewing a
+// single file or no hunk has been scrolled to yet.
+func (m Model) CurrentHunkIndex() int {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return -1
+	}
+	y := m.vp.YOffset()
+	idx := -1
+	for i, off := range m.file.hunkOffsets {
+		if off <= y+1 {
+			idx = i
+		} else {
+			break
+		}
+	}
+	if idx < 0 {
+		return 0 // before the first hunk header — treat the first as current
+	}
+	return idx
+}
+
+// IsViewingFile reports whether the diff viewer currently shows a single file.
+func (m Model) IsViewingFile() bool {
+	return m.file != nil && len(m.file.files) == 1
+}
+
+// CurrentFile returns the gitdiff.File for the active single-file view.
+func (m Model) CurrentFile() *gitdiff.File {
+	if !m.IsViewingFile() {
+		return nil
+	}
+	return m.file.files[0]
+}
+
+var hunkTopBorderRegex = regexp.MustCompile(`^─+┐$`)
+
+// findHunkHeaderLines returns 0-based line indices of each hunk header's top
+// border in the rendered delta output.
+func findHunkHeaderLines(content string) []int {
+	var positions []int
+	for i, line := range strings.Split(content, "\n") {
+		stripped := strings.TrimSpace(ansi.Strip(line))
+		if hunkTopBorderRegex.MatchString(stripped) {
+			positions = append(positions, i)
+		}
+	}
+	return positions
+}
+
+// applyReviewedMarkers inserts a "✓ reviewed" line above each hunk whose
+// corresponding mask entry is true. Returns the new content plus the line
+// offsets of each hunk header in the new content.
+func applyReviewedMarkers(raw string, mask []bool) (string, []int) {
+	offsets := findHunkHeaderLines(raw)
+	if len(offsets) == 0 {
+		return raw, nil
+	}
+	lines := strings.Split(raw, "\n")
+	out := make([]string, 0, len(lines)+len(offsets))
+	newOffsets := make([]int, 0, len(offsets))
+	marker := lipgloss.NewStyle().
+		Foreground(lipgloss.Green).
+		Bold(true).
+		Render("✓ reviewed")
+	hunkIdx := 0
+	for i, line := range lines {
+		if hunkIdx < len(offsets) && i == offsets[hunkIdx] {
+			if hunkIdx < len(mask) && mask[hunkIdx] {
+				out = append(out, marker)
+			}
+			newOffsets = append(newOffsets, len(out))
+			hunkIdx++
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n"), newOffsets
 }
 
 // PHP's syntect grammar starts in HTML mode and only enters PHP scope after `<?php`/`<?=`.

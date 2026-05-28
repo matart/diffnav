@@ -145,6 +145,46 @@ func TestInjectPHPOpenTag_PHPExtensionVariants(t *testing.T) {
 	}
 }
 
+func TestFindHunkHeaderLines(t *testing.T) {
+	in := "test.go\n────\n\n───────────────┐\n10: foo │\n───────────────┘\n a\n-b\n+c\n───────────────┐\n50: bar │\n───────────────┘\n x\n"
+	got := findHunkHeaderLines(in)
+	want := []int{3, 9}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d offsets, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("offset[%d]: got %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestApplyReviewedMarkers_InjectsAboveReviewedHunks(t *testing.T) {
+	in := "───────────────┐\n10: foo │\n───────────────┘\n a\n───────────────┐\n50: bar │\n───────────────┘\n x"
+	out, offsets := applyReviewedMarkers(in, []bool{false, true})
+	// First hunk unchanged at line 0, second hunk pushed down by one marker line.
+	if offsets[0] != 0 {
+		t.Fatalf("first hunk should still be at line 0, got %d", offsets[0])
+	}
+	if offsets[1] != 5 {
+		t.Fatalf("second hunk should be at line 5 (was 4, marker pushed it), got %d", offsets[1])
+	}
+	if !strings.Contains(out, "✓ reviewed") {
+		t.Fatal("expected reviewed marker in output")
+	}
+}
+
+func TestApplyReviewedMarkers_NoHunksNoOp(t *testing.T) {
+	in := "no hunks here\njust text\n"
+	out, offsets := applyReviewedMarkers(in, nil)
+	if out != in {
+		t.Fatalf("expected unchanged: got %q", out)
+	}
+	if len(offsets) != 0 {
+		t.Fatal("expected no offsets")
+	}
+}
+
 func TestRenderPreamble_MergeCommit(t *testing.T) {
 	preamble := `commit abc123def456
 Merge: aaa111 bbb222
