@@ -591,9 +591,9 @@ func findHunkHeaderLines(content string) []int {
 }
 
 // applyReviewedMarkers inserts a "✓ reviewed" line above each hunk whose
-// corresponding mask entry is true, and restyles the current hunk's top-border
-// in bright cyan with a ▸ prefix. Returns the new content plus the line offsets
-// of each hunk header in the new content.
+// corresponding mask entry is true, and restyles the current hunk's 3-line
+// header box (top border, title, bottom border) in bright cyan. Returns the
+// new content plus the line offsets of each hunk header in the new content.
 func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []int) {
 	offsets := findHunkHeaderLines(raw)
 	if len(offsets) == 0 {
@@ -606,9 +606,12 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 		Foreground(lipgloss.Green).
 		Bold(true).
 		Render("✓ reviewed")
-	currentStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.BrightCyan).
-		Bold(true)
+
+	currentTop := -1
+	if currentIdx >= 0 && currentIdx < len(offsets) {
+		currentTop = offsets[currentIdx]
+	}
+
 	hunkIdx := 0
 	for i, line := range lines {
 		if hunkIdx < len(offsets) && i == offsets[hunkIdx] {
@@ -616,21 +619,40 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 				out = append(out, marker)
 			}
 			newOffsets = append(newOffsets, len(out))
-			if hunkIdx == currentIdx {
-				// Restyle the top-border line. Strip delta's existing ANSI and
-				// re-render with our highlight. ▸ replaces the leading ─.
-				stripped := strings.TrimSpace(ansi.Strip(line))
-				if strings.HasSuffix(stripped, "┐") && len(stripped) > 1 {
-					body := strings.TrimSuffix(stripped, "┐")
-					replaced := "▸" + strings.TrimPrefix(body, "─") + "┐"
-					line = currentStyle.Render(replaced)
-				}
-			}
 			hunkIdx++
+		}
+		if currentTop >= 0 && i >= currentTop && i <= currentTop+2 {
+			line = restyleCurrentHeaderLine(line, i-currentTop)
 		}
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n"), newOffsets
+}
+
+// restyleCurrentHeaderLine re-renders one line of a hunk header box in cyan
+// bold so the active hunk stands out. row is 0=top border, 1=title, 2=bottom.
+func restyleCurrentHeaderLine(line string, row int) string {
+	style := lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true)
+	stripped := strings.TrimSpace(ansi.Strip(line))
+	switch row {
+	case 0:
+		if strings.HasSuffix(stripped, "┐") && len(stripped) > 1 {
+			body := strings.TrimSuffix(stripped, "┐")
+			return style.Render("▸" + strings.TrimPrefix(body, "─") + "┐")
+		}
+	case 1:
+		if strings.HasSuffix(stripped, "│") {
+			body := strings.TrimSuffix(stripped, "│")
+			body = strings.TrimSpace(body)
+			return style.Render(" " + body + " │")
+		}
+	case 2:
+		if strings.HasSuffix(stripped, "┘") && len(stripped) > 1 {
+			body := strings.TrimSuffix(stripped, "┘")
+			return style.Render(" " + strings.TrimPrefix(body, "─") + "┘")
+		}
+	}
+	return line
 }
 
 // PHP's syntect grammar starts in HTML mode and only enters PHP scope after `<?php`/`<?=`.
