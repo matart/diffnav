@@ -654,8 +654,12 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 		Render("✓ reviewed")
 
 	currentTop := -1
+	currentReviewed := false
 	if currentIdx >= 0 && currentIdx < len(offsets) {
 		currentTop = offsets[currentIdx]
+		if currentIdx < len(mask) {
+			currentReviewed = mask[currentIdx]
+		}
 	}
 
 	hunkIdx := 0
@@ -665,7 +669,7 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 			hunkIdx++
 		}
 		if currentTop >= 0 && i >= currentTop && i <= currentTop+2 {
-			line = restyleCurrentHeaderLine(line, i-currentTop)
+			line = restyleCurrentHeaderLine(line, i-currentTop, currentReviewed)
 		}
 		out = append(out, line)
 		// After the bottom border of a reviewed hunk, drop the marker.
@@ -679,10 +683,15 @@ func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []in
 	return strings.Join(out, "\n"), newOffsets
 }
 
-// restyleCurrentHeaderLine re-renders one line of a hunk header box in cyan
-// bold so the active hunk stands out. row is 0=top border, 1=title, 2=bottom.
-func restyleCurrentHeaderLine(line string, row int) string {
-	style := lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true)
+// restyleCurrentHeaderLine re-renders one line of a hunk header box so the
+// active hunk stands out. Orange when unreviewed, green when reviewed.
+// row is 0=top border, 1=title, 2=bottom.
+func restyleCurrentHeaderLine(line string, row int, reviewed bool) string {
+	color := lipgloss.Color("214") // orange
+	if reviewed {
+		color = lipgloss.Green
+	}
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
 	stripped := strings.TrimSpace(ansi.Strip(line))
 	switch row {
 	case 0:
