@@ -27,7 +27,7 @@ func TestBuildFullFileTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := buildFullFileTree(files, config.Config{})
+	tr := buildFullFileTree(files, config.Config{}, nil)
 	allNodes := tr.AllNodes()
 	if len(allNodes) != 5 {
 		t.Fatalf("expected 5 nodes, but got %d", len(allNodes))
@@ -105,7 +105,7 @@ func TestCollapseTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := buildFullFileTree(files, config.Config{})
+	tr := buildFullFileTree(files, config.Config{}, nil)
 	tr = collapseTree(tr)
 
 	allNodes := tr.AllNodes()
@@ -178,7 +178,7 @@ func TestUncollapsableTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := buildFullFileTree(files, config.Config{})
+	tr := buildFullFileTree(files, config.Config{}, nil)
 
 	tr = collapseTree(tr)
 	allNodes := tr.AllNodes()
@@ -197,7 +197,7 @@ func TestCloseDirsBelowDepthZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := buildFullFileTree(files, config.Config{})
+	tr := buildFullFileTree(files, config.Config{}, nil)
 	tr = collapseTree(tr)
 
 	treeModel := tree.New(nil, 80, 40)
@@ -241,7 +241,7 @@ func TestCloseDirsBelowDepthOne(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tr := buildFullFileTree(files, config.Config{})
+	tr := buildFullFileTree(files, config.Config{}, nil)
 	tr = collapseTree(tr)
 
 	treeModel := tree.New(nil, 80, 40)

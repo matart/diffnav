@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dlvhdr/diffnav/pkg/reviewed"
 )
 
 type UIConfig struct {
@@ -29,8 +31,9 @@ type WatchConfig struct {
 }
 
 type Config struct {
-	UI    UIConfig    `yaml:"ui"`
-	Watch WatchConfig `yaml:"-"`
+	UI      UIConfig         `yaml:"ui"`
+	Storage reviewed.Config  `yaml:"storage"`
+	Watch   WatchConfig      `yaml:"-"`
 }
 
 func DefaultConfig() Config {

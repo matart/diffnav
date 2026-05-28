@@ -148,6 +148,19 @@ ui:
 | `unicode`             | Unicode symbols (+/⛌/●)                                          |
 | `ascii`               | Plain ASCII characters (+/x/\*)                                  |
 
+### Storage
+
+`diffnav` persists reviewed-hunk markers (toggled with <kbd>r</kbd>) to a JSON file.
+By default it's `~/.local/share/diffnav/reviewed.json` (or `$XDG_DATA_HOME/diffnav/`
+if set). Override via env var or config:
+
+```yaml
+storage:
+  path: ~/Library/Application Support/diffnav
+```
+
+Env var override: `DIFFNAV_STORAGE_DIR` (priority: env > yaml > default).
+
 ### Delta
 
 You can also configure the diff rendering through delta. Check out [their docs](https://dandavison.github.io/delta/configuration.html).
@@ -169,6 +182,8 @@ This fork's delta config lives at [`cfg/delta.conf`](./cfg/delta.conf).
 | <kbd>y</kbd>                | Copy file path                   |
 | <kbd>i</kbd>                | Cycle icon style                 |
 | <kbd>o</kbd>                | Open file in $EDITOR             |
+| <kbd>r</kbd>                | Toggle current hunk as reviewed  |
+| <kbd>]</kbd> / <kbd>[</kbd> | Next / previous hunk             |
 | <kbd>s</kbd>                | Toggle side-by-side/unified view |
 | <kbd>Tab</kbd>              | Switch focus between the panes   |
 | <kbd>q</kbd>                | Quit                             |

@@ -24,6 +24,9 @@ type KeyMap struct {
 	ToggleIconStyle key.Binding
 	ToggleHelp      key.Binding
 	ToggleMessage   key.Binding
+	ToggleReviewed  key.Binding
+	NextHunk        key.Binding
+	PrevHunk        key.Binding
 }
 
 var keys = &KeyMap{
@@ -111,6 +114,18 @@ var keys = &KeyMap{
 		key.WithKeys("m"),
 		key.WithHelp("m", "commit info"),
 	),
+	ToggleReviewed: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "toggle reviewed"),
+	),
+	NextHunk: key.NewBinding(
+		key.WithKeys("]"),
+		key.WithHelp("]", "next hunk"),
+	),
+	PrevHunk: key.NewBinding(
+		key.WithKeys("["),
+		key.WithHelp("[", "prev hunk"),
+	),
 }
 
 func KeyGroups() [][]key.Binding {
@@ -131,6 +146,9 @@ func KeyGroups() [][]key.Binding {
 		keys.OpenInEditor,
 		keys.ToggleDiffView,
 		keys.ToggleIconStyle,
+		keys.ToggleReviewed,
+		keys.NextHunk,
+		keys.PrevHunk,
 	}, {
 		keys.ToggleMessage,
 		keys.ToggleHelp,

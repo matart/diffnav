@@ -27,7 +27,11 @@ type cachedNode struct {
 	files     []*gitdiff.File
 	additions int64
 	deletions int64
-	diff      string
+	diff      string // viewport content (markers applied)
+	rawDiff   string // delta output (no markers)
+	// hunkOffsets[i] is the line index of fragment i's header top-border in the
+	// currently-displayed diff. Recomputed each time markers change.
+	hunkOffsets []int
 }
 
 type nodeCache map[string]*cachedNode
@@ -41,12 +45,18 @@ func cacheKey(path string, sideBySide bool) string {
 
 type Model struct {
 	common.Common
-	vp         viewport.Model
-	file       *cachedNode
-	dir        *cachedNode
-	cache      nodeCache
-	sideBySide bool
-	preamble   string
+	vp             viewport.Model
+	file           *cachedNode
+	dir            *cachedNode
+	cache          nodeCache
+	sideBySide     bool
+	preamble       string
+	reviewedMask   []bool // one bool per hunk in the current file (only used when file != nil)
+	currentHunkIdx int
+	lastYOffset    int
+	// pendingHunkIdx is the hunk to activate once the next diffContentMsg fills
+	// in hunkOffsets. -1 means no pending position.
+	pendingHunkIdx int
 }
 
 // SetPreamble stores the preamble text (e.g. commit metadata from git show).
@@ -56,9 +66,10 @@ func (m *Model) SetPreamble(preamble string) {
 
 func New(sideBySide bool) Model {
 	return Model{
-		vp:         viewport.Model{},
-		sideBySide: sideBySide,
-		cache:      map[string]*cachedNode{},
+		vp:             viewport.Model{},
+		sideBySide:     sideBySide,
+		cache:          map[string]*cachedNode{},
+		pendingHunkIdx: -1,
 	}
 }
 
@@ -77,16 +88,47 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				lines[i] = ansi.Truncate(line, m.vp.Width(), "")
 			}
 		}
-		diff := strings.Join(lines, "\n")
-		if _, ok := m.cache[msg.cacheKey]; ok {
-			m.cache[msg.cacheKey].diff = diff
+		raw := strings.Join(lines, "\n")
+		mask := m.reviewedMask
+		currentIdx := m.currentHunkIdx
+		appliedPending := false
+		if m.cache[msg.cacheKey] != nil && m.file != nil && m.cache[msg.cacheKey] == m.file && m.pendingHunkIdx >= 0 {
+			// Pending hunk position set by mainModel before the diff was ready.
+			currentIdx = m.pendingHunkIdx
+			m.currentHunkIdx = m.pendingHunkIdx
+			m.pendingHunkIdx = -1
+			appliedPending = true
 		}
-		m.vp.SetContent(diff)
+		if m.cache[msg.cacheKey] == nil || m.file == nil || m.cache[msg.cacheKey] != m.file {
+			mask = nil
+			currentIdx = -1
+		}
+		rendered, offsets := applyReviewedMarkers(raw, mask, currentIdx)
+		if n, ok := m.cache[msg.cacheKey]; ok {
+			n.rawDiff = raw
+			n.diff = rendered
+			n.hunkOffsets = offsets
+		}
+		m.vp.SetContent(rendered)
+		if appliedPending {
+			m.scrollToCurrentHunk()
+		}
 	}
 
 	vp, vpCmd := m.vp.Update(msg)
 	cmds = append(cmds, vpCmd)
 	m.vp = vp
+
+	// If the viewport scrolled into a different hunk, re-derive currentHunkIdx
+	// so the highlight follows j/k/Ctrl-D/Ctrl-U scrolling.
+	if m.vp.YOffset() != m.lastYOffset && m.file != nil && len(m.file.hunkOffsets) > 0 {
+		m.lastYOffset = m.vp.YOffset()
+		newIdx := m.hunkIndexForOffset(m.vp.YOffset())
+		if newIdx != m.currentHunkIdx {
+			m.currentHunkIdx = newIdx
+			m.refreshView()
+		}
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -174,6 +216,9 @@ func (m Model) headerView() string {
 	top := prefix + base.Bold(true).Render(name)
 
 	bottom := filenode.ViewFileDiffStats(m.file.files[0], base)
+	if hint := m.hunkHint(); hint != "" {
+		bottom = bottom + base.Foreground(lipgloss.Color("8")).Render("  ·  ") + hint
+	}
 
 	return base.
 		Width(m.Width).
@@ -182,6 +227,28 @@ func (m Model) headerView() string {
 		BorderBottom(true).
 		BorderForeground(lipgloss.Color("8")).
 		Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom))
+}
+
+// hunkHint renders "hunk N/M ✓/○  r toggle · ] [ next/prev" — gives the user
+// the mental model: which hunk r will toggle, its state, and how to navigate.
+func (m Model) hunkHint() string {
+	total := m.TotalHunks()
+	if total == 0 {
+		return ""
+	}
+	idx := m.CurrentHunkIndex()
+	if idx < 0 {
+		idx = 0
+	}
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	accent := lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true)
+	status := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ unreviewed")
+	if m.IsCurrentHunkReviewed() {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Green).Bold(true).Render("✓ reviewed")
+	}
+	return accent.Render(fmt.Sprintf("hunk %d/%d", idx+1, total)) +
+		" " + status +
+		dim.Render("   r toggle · ] [ next/prev")
 }
 
 func (m Model) dirHeaderView() string {
@@ -202,6 +269,9 @@ func (m Model) dirHeaderView() string {
 
 func (m Model) SetFilePatch(file *gitdiff.File) (Model, tea.Cmd) {
 	m.dir = nil
+	m.currentHunkIdx = 0
+	m.lastYOffset = 0
+	m.pendingHunkIdx = -1
 
 	fname := filenode.GetFileName(file)
 	key := cacheKey(fname, m.sideBySide)
@@ -397,6 +467,252 @@ func renderPreamble(preamble string) string {
 type diffContentMsg struct {
 	cacheKey string
 	text     string
+}
+
+// SetReviewedMask updates which hunks of the current file are marked reviewed and
+// re-renders the viewport. mask is indexed by fragment position in file.TextFragments.
+func (m *Model) SetReviewedMask(mask []bool) {
+	m.reviewedMask = mask
+	m.refreshView()
+}
+
+// refreshView re-applies markers + current-hunk highlight to the cached raw diff
+// and sets the viewport content. No-op if there's no raw content yet.
+func (m *Model) refreshView() {
+	if m.file == nil || m.file.rawDiff == "" {
+		return
+	}
+	rendered, offsets := applyReviewedMarkers(m.file.rawDiff, m.reviewedMask, m.currentHunkIdx)
+	m.file.diff = rendered
+	m.file.hunkOffsets = offsets
+	m.vp.SetContent(rendered)
+}
+
+// NextHunk advances currentHunkIdx and scrolls the viewport to show it.
+func (m *Model) NextHunk() bool {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return false
+	}
+	if m.currentHunkIdx >= len(m.file.hunkOffsets)-1 {
+		return false
+	}
+	m.currentHunkIdx++
+	m.scrollToCurrentHunk()
+	m.refreshView()
+	return true
+}
+
+// PrevHunk decrements currentHunkIdx and scrolls the viewport to show it.
+func (m *Model) PrevHunk() bool {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return false
+	}
+	if m.currentHunkIdx <= 0 {
+		return false
+	}
+	m.currentHunkIdx--
+	m.scrollToCurrentHunk()
+	m.refreshView()
+	return true
+}
+
+// scrollToCurrentHunk positions the viewport at the current hunk's header.
+// SetYOffset clamps automatically when near end-of-content, which is fine —
+// the header will still be on screen.
+func (m *Model) scrollToCurrentHunk() {
+	if m.currentHunkIdx < 0 || m.currentHunkIdx >= len(m.file.hunkOffsets) {
+		return
+	}
+	m.vp.SetYOffset(m.file.hunkOffsets[m.currentHunkIdx])
+	// Sync so the Update loop doesn't override our explicit selection with the
+	// scroll-derived heuristic.
+	m.lastYOffset = m.vp.YOffset()
+}
+
+// SetCurrentHunkIndex positions the active hunk to idx. If the diff content
+// hasn't been rendered yet (no hunkOffsets), the position is stored as pending
+// and applied when the next diffContentMsg arrives. Negative idx is clamped to
+// 0; out-of-range idx is clamped to the last hunk.
+func (m *Model) SetCurrentHunkIndex(idx int) {
+	if m.file == nil || len(m.file.files) != 1 {
+		return
+	}
+	total := len(m.file.files[0].TextFragments)
+	if total == 0 {
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= total {
+		idx = total - 1
+	}
+	if len(m.file.hunkOffsets) > 0 {
+		m.currentHunkIdx = idx
+		m.scrollToCurrentHunk()
+		m.refreshView()
+		m.pendingHunkIdx = -1
+	} else {
+		m.pendingHunkIdx = idx
+		m.currentHunkIdx = idx
+	}
+}
+
+// TotalHunks returns the hunk count for the active file, or 0.
+func (m Model) TotalHunks() int {
+	if m.file == nil || len(m.file.files) != 1 {
+		return 0
+	}
+	return len(m.file.files[0].TextFragments)
+}
+
+// IsCurrentHunkReviewed reports whether the current hunk is marked reviewed.
+func (m Model) IsCurrentHunkReviewed() bool {
+	idx := m.CurrentHunkIndex()
+	if idx < 0 || idx >= len(m.reviewedMask) {
+		return false
+	}
+	return m.reviewedMask[idx]
+}
+
+// CurrentHunkIndex returns the active hunk index. -1 if not viewing a single file.
+func (m Model) CurrentHunkIndex() int {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return -1
+	}
+	if m.currentHunkIdx < 0 {
+		return 0
+	}
+	if m.currentHunkIdx >= len(m.file.hunkOffsets) {
+		return len(m.file.hunkOffsets) - 1
+	}
+	return m.currentHunkIdx
+}
+
+// hunkIndexForOffset returns the index of the topmost-passed hunk header for a
+// given viewport y-offset. Used to re-derive the active hunk when the user
+// scrolls with j/k/Ctrl-D/Ctrl-U (not ] / [).
+func (m Model) hunkIndexForOffset(y int) int {
+	idx := -1
+	for i, off := range m.file.hunkOffsets {
+		if off <= y+1 {
+			idx = i
+		} else {
+			break
+		}
+	}
+	if idx < 0 {
+		return 0
+	}
+	return idx
+}
+
+// IsViewingFile reports whether the diff viewer currently shows a single file.
+func (m Model) IsViewingFile() bool {
+	return m.file != nil && len(m.file.files) == 1
+}
+
+// CurrentFile returns the gitdiff.File for the active single-file view.
+func (m Model) CurrentFile() *gitdiff.File {
+	if !m.IsViewingFile() {
+		return nil
+	}
+	return m.file.files[0]
+}
+
+var hunkTopBorderRegex = regexp.MustCompile(`^─+┐$`)
+
+// findHunkHeaderLines returns 0-based line indices of each hunk header's top
+// border in the rendered delta output.
+func findHunkHeaderLines(content string) []int {
+	var positions []int
+	for i, line := range strings.Split(content, "\n") {
+		stripped := strings.TrimSpace(ansi.Strip(line))
+		if hunkTopBorderRegex.MatchString(stripped) {
+			positions = append(positions, i)
+		}
+	}
+	return positions
+}
+
+// applyReviewedMarkers inserts a "✓ reviewed" line immediately after each
+// reviewed hunk's bottom border (so it stays visible when the hunk is at the
+// top of the viewport) and restyles the current hunk's 3-line header box in
+// bright cyan. Returns the new content plus the line offsets of each hunk
+// header (top border position) in the new content.
+func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []int) {
+	offsets := findHunkHeaderLines(raw)
+	if len(offsets) == 0 {
+		return raw, nil
+	}
+	lines := strings.Split(raw, "\n")
+	out := make([]string, 0, len(lines)+len(offsets))
+	newOffsets := make([]int, 0, len(offsets))
+	marker := lipgloss.NewStyle().
+		Foreground(lipgloss.Green).
+		Bold(true).
+		Render("✓ reviewed")
+
+	currentTop := -1
+	currentReviewed := false
+	if currentIdx >= 0 && currentIdx < len(offsets) {
+		currentTop = offsets[currentIdx]
+		if currentIdx < len(mask) {
+			currentReviewed = mask[currentIdx]
+		}
+	}
+
+	hunkIdx := 0
+	for i, line := range lines {
+		if hunkIdx < len(offsets) && i == offsets[hunkIdx] {
+			newOffsets = append(newOffsets, len(out))
+			hunkIdx++
+		}
+		if currentTop >= 0 && i >= currentTop && i <= currentTop+2 {
+			line = restyleCurrentHeaderLine(line, i-currentTop, currentReviewed)
+		}
+		out = append(out, line)
+		// After the bottom border of a reviewed hunk, drop the marker.
+		if hunkIdx > 0 {
+			k := hunkIdx - 1
+			if i == offsets[k]+2 && k < len(mask) && mask[k] {
+				out = append(out, marker)
+			}
+		}
+	}
+	return strings.Join(out, "\n"), newOffsets
+}
+
+// restyleCurrentHeaderLine re-renders one line of a hunk header box so the
+// active hunk stands out. Orange when unreviewed, green when reviewed.
+// row is 0=top border, 1=title, 2=bottom.
+func restyleCurrentHeaderLine(line string, row int, reviewed bool) string {
+	color := lipgloss.Color("214") // orange
+	if reviewed {
+		color = lipgloss.Green
+	}
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	stripped := strings.TrimSpace(ansi.Strip(line))
+	switch row {
+	case 0:
+		if strings.HasSuffix(stripped, "┐") && len(stripped) > 1 {
+			body := strings.TrimSuffix(stripped, "┐")
+			return style.Render("▸" + strings.TrimPrefix(body, "─") + "┐")
+		}
+	case 1:
+		if strings.HasSuffix(stripped, "│") {
+			// Preserve delta's exact spacing so the title's `│` lands at the
+			// same column as the border's `┐` and `┘`.
+			body := strings.TrimSuffix(stripped, "│")
+			return style.Render(body + "│")
+		}
+	case 2:
+		if strings.HasSuffix(stripped, "┘") && len(stripped) > 1 {
+			body := strings.TrimSuffix(stripped, "┘")
+			return style.Render(" " + strings.TrimPrefix(body, "─") + "┘")
+		}
+	}
+	return line
 }
 
 // PHP's syntect grammar starts in HTML mode and only enters PHP scope after `<?php`/`<?=`.
