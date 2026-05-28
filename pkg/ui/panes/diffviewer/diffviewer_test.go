@@ -161,7 +161,7 @@ func TestFindHunkHeaderLines(t *testing.T) {
 
 func TestApplyReviewedMarkers_InjectsAboveReviewedHunks(t *testing.T) {
 	in := "───────────────┐\n10: foo │\n───────────────┘\n a\n───────────────┐\n50: bar │\n───────────────┘\n x"
-	out, offsets := applyReviewedMarkers(in, []bool{false, true})
+	out, offsets := applyReviewedMarkers(in, []bool{false, true}, -1)
 	// First hunk unchanged at line 0, second hunk pushed down by one marker line.
 	if offsets[0] != 0 {
 		t.Fatalf("first hunk should still be at line 0, got %d", offsets[0])
@@ -176,7 +176,7 @@ func TestApplyReviewedMarkers_InjectsAboveReviewedHunks(t *testing.T) {
 
 func TestApplyReviewedMarkers_NoHunksNoOp(t *testing.T) {
 	in := "no hunks here\njust text\n"
-	out, offsets := applyReviewedMarkers(in, nil)
+	out, offsets := applyReviewedMarkers(in, nil, -1)
 	if out != in {
 		t.Fatalf("expected unchanged: got %q", out)
 	}

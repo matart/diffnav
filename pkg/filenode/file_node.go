@@ -103,13 +103,14 @@ func (f *FileNode) renderStandardLayout(name string) string {
 	return coloredIcon + truncatedName + suffix
 }
 
-// reviewedBadge renders ` 3/7` (dim green) when some hunks are reviewed, or "" otherwise.
+// reviewedBadge renders ` n/m` after the row. Always shown when the file has
+// hunks: dim grey for 0 reviewed (a "not started" marker), green when all done.
 func (f *FileNode) reviewedBadge() string {
 	if f.ReviewedFn == nil {
 		return ""
 	}
 	done, total := f.ReviewedFn(f.File)
-	if total == 0 || done == 0 {
+	if total == 0 {
 		return ""
 	}
 	color := lipgloss.Color("8")

@@ -334,6 +334,10 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleIconStyle()
 		case key.Matches(msg, keys.ToggleReviewed):
 			m.toggleReviewedAtCursor()
+		case key.Matches(msg, keys.NextHunk):
+			m.diffViewer.NextHunk()
+		case key.Matches(msg, keys.PrevHunk):
+			m.diffViewer.PrevHunk()
 		case key.Matches(msg, keys.ToggleDiffView):
 			m.sideBySide = !m.sideBySide
 			cmd = m.diffViewer.SetSideBySide(m.sideBySide)

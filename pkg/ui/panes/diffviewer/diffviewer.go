@@ -45,13 +45,15 @@ func cacheKey(path string, sideBySide bool) string {
 
 type Model struct {
 	common.Common
-	vp            viewport.Model
-	file          *cachedNode
-	dir           *cachedNode
-	cache         nodeCache
-	sideBySide    bool
-	preamble      string
-	reviewedMask  []bool // one bool per hunk in the current file (only used when file != nil)
+	vp             viewport.Model
+	file           *cachedNode
+	dir            *cachedNode
+	cache          nodeCache
+	sideBySide     bool
+	preamble       string
+	reviewedMask   []bool // one bool per hunk in the current file (only used when file != nil)
+	currentHunkIdx int
+	lastYOffset    int
 }
 
 // SetPreamble stores the preamble text (e.g. commit metadata from git show).
@@ -84,10 +86,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		raw := strings.Join(lines, "\n")
 		mask := m.reviewedMask
+		currentIdx := m.currentHunkIdx
 		if m.cache[msg.cacheKey] == nil || m.file == nil || m.cache[msg.cacheKey] != m.file {
-			mask = nil // mask only applies to the currently-active file
+			mask = nil
+			currentIdx = -1
 		}
-		rendered, offsets := applyReviewedMarkers(raw, mask)
+		rendered, offsets := applyReviewedMarkers(raw, mask, currentIdx)
 		if n, ok := m.cache[msg.cacheKey]; ok {
 			n.rawDiff = raw
 			n.diff = rendered
@@ -99,6 +103,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	vp, vpCmd := m.vp.Update(msg)
 	cmds = append(cmds, vpCmd)
 	m.vp = vp
+
+	// If the viewport scrolled into a different hunk, re-render so the highlight follows.
+	if m.vp.YOffset() != m.lastYOffset {
+		m.lastYOffset = m.vp.YOffset()
+		newIdx := m.CurrentHunkIndex()
+		if newIdx >= 0 && newIdx != m.currentHunkIdx {
+			m.currentHunkIdx = newIdx
+			m.refreshView()
+		}
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -186,6 +200,9 @@ func (m Model) headerView() string {
 	top := prefix + base.Bold(true).Render(name)
 
 	bottom := filenode.ViewFileDiffStats(m.file.files[0], base)
+	if hint := m.hunkHint(); hint != "" {
+		bottom = bottom + base.Foreground(lipgloss.Color("8")).Render("  ·  ") + hint
+	}
 
 	return base.
 		Width(m.Width).
@@ -194,6 +211,28 @@ func (m Model) headerView() string {
 		BorderBottom(true).
 		BorderForeground(lipgloss.Color("8")).
 		Render(lipgloss.JoinVertical(lipgloss.Left, top, bottom))
+}
+
+// hunkHint renders "hunk N/M ✓/○  r toggle · ] [ next/prev" — gives the user
+// the mental model: which hunk r will toggle, its state, and how to navigate.
+func (m Model) hunkHint() string {
+	total := m.TotalHunks()
+	if total == 0 {
+		return ""
+	}
+	idx := m.CurrentHunkIndex()
+	if idx < 0 {
+		idx = 0
+	}
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	accent := lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true)
+	status := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○ unreviewed")
+	if m.IsCurrentHunkReviewed() {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Green).Bold(true).Render("✓ reviewed")
+	}
+	return accent.Render(fmt.Sprintf("hunk %d/%d", idx+1, total)) +
+		" " + status +
+		dim.Render("   r toggle · ] [ next/prev")
 }
 
 func (m Model) dirHeaderView() string {
@@ -214,6 +253,8 @@ func (m Model) dirHeaderView() string {
 
 func (m Model) SetFilePatch(file *gitdiff.File) (Model, tea.Cmd) {
 	m.dir = nil
+	m.currentHunkIdx = 0
+	m.lastYOffset = 0
 
 	fname := filenode.GetFileName(file)
 	key := cacheKey(fname, m.sideBySide)
@@ -415,13 +456,67 @@ type diffContentMsg struct {
 // re-renders the viewport. mask is indexed by fragment position in file.TextFragments.
 func (m *Model) SetReviewedMask(mask []bool) {
 	m.reviewedMask = mask
+	m.refreshView()
+}
+
+// refreshView re-applies markers + current-hunk highlight to the cached raw diff
+// and sets the viewport content. No-op if there's no raw content yet.
+func (m *Model) refreshView() {
 	if m.file == nil || m.file.rawDiff == "" {
 		return
 	}
-	rendered, offsets := applyReviewedMarkers(m.file.rawDiff, mask)
+	rendered, offsets := applyReviewedMarkers(m.file.rawDiff, m.reviewedMask, m.currentHunkIdx)
 	m.file.diff = rendered
 	m.file.hunkOffsets = offsets
 	m.vp.SetContent(rendered)
+}
+
+// NextHunk scrolls the viewport so the next hunk's header is at the top. Returns
+// true if the viewport was moved.
+func (m *Model) NextHunk() bool {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return false
+	}
+	y := m.vp.YOffset()
+	for _, off := range m.file.hunkOffsets {
+		if off > y {
+			m.vp.SetYOffset(off)
+			return true
+		}
+	}
+	return false
+}
+
+// PrevHunk scrolls the viewport so the previous hunk's header is at the top.
+func (m *Model) PrevHunk() bool {
+	if m.file == nil || len(m.file.hunkOffsets) == 0 {
+		return false
+	}
+	y := m.vp.YOffset()
+	for i := len(m.file.hunkOffsets) - 1; i >= 0; i-- {
+		if m.file.hunkOffsets[i] < y {
+			m.vp.SetYOffset(m.file.hunkOffsets[i])
+			return true
+		}
+	}
+	return false
+}
+
+// TotalHunks returns the hunk count for the active file, or 0.
+func (m Model) TotalHunks() int {
+	if m.file == nil || len(m.file.files) != 1 {
+		return 0
+	}
+	return len(m.file.files[0].TextFragments)
+}
+
+// IsCurrentHunkReviewed reports whether the current hunk is marked reviewed.
+func (m Model) IsCurrentHunkReviewed() bool {
+	idx := m.CurrentHunkIndex()
+	if idx < 0 || idx >= len(m.reviewedMask) {
+		return false
+	}
+	return m.reviewedMask[idx]
 }
 
 // CurrentHunkIndex returns the index of the topmost-passed hunk in the displayed
@@ -475,9 +570,10 @@ func findHunkHeaderLines(content string) []int {
 }
 
 // applyReviewedMarkers inserts a "✓ reviewed" line above each hunk whose
-// corresponding mask entry is true. Returns the new content plus the line
-// offsets of each hunk header in the new content.
-func applyReviewedMarkers(raw string, mask []bool) (string, []int) {
+// corresponding mask entry is true, and restyles the current hunk's top-border
+// in bright cyan with a ▸ prefix. Returns the new content plus the line offsets
+// of each hunk header in the new content.
+func applyReviewedMarkers(raw string, mask []bool, currentIdx int) (string, []int) {
 	offsets := findHunkHeaderLines(raw)
 	if len(offsets) == 0 {
 		return raw, nil
@@ -489,6 +585,9 @@ func applyReviewedMarkers(raw string, mask []bool) (string, []int) {
 		Foreground(lipgloss.Green).
 		Bold(true).
 		Render("✓ reviewed")
+	currentStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.BrightCyan).
+		Bold(true)
 	hunkIdx := 0
 	for i, line := range lines {
 		if hunkIdx < len(offsets) && i == offsets[hunkIdx] {
@@ -496,6 +595,16 @@ func applyReviewedMarkers(raw string, mask []bool) (string, []int) {
 				out = append(out, marker)
 			}
 			newOffsets = append(newOffsets, len(out))
+			if hunkIdx == currentIdx {
+				// Restyle the top-border line. Strip delta's existing ANSI and
+				// re-render with our highlight. ▸ replaces the leading ─.
+				stripped := strings.TrimSpace(ansi.Strip(line))
+				if strings.HasSuffix(stripped, "┐") && len(stripped) > 1 {
+					body := strings.TrimSuffix(stripped, "┐")
+					replaced := "▸" + strings.TrimPrefix(body, "─") + "┐"
+					line = currentStyle.Render(replaced)
+				}
+			}
 			hunkIdx++
 		}
 		out = append(out, line)

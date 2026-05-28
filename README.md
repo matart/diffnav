@@ -183,6 +183,7 @@ This fork's delta config lives at [`cfg/delta.conf`](./cfg/delta.conf).
 | <kbd>i</kbd>                | Cycle icon style                 |
 | <kbd>o</kbd>                | Open file in $EDITOR             |
 | <kbd>r</kbd>                | Toggle current hunk as reviewed  |
+| <kbd>]</kbd> / <kbd>[</kbd> | Next / previous hunk             |
 | <kbd>s</kbd>                | Toggle side-by-side/unified view |
 | <kbd>Tab</kbd>              | Switch focus between the panes   |
 | <kbd>q</kbd>                | Quit                             |
