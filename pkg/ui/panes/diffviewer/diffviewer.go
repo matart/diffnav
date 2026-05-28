@@ -104,11 +104,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	cmds = append(cmds, vpCmd)
 	m.vp = vp
 
-	// If the viewport scrolled into a different hunk, re-render so the highlight follows.
-	if m.vp.YOffset() != m.lastYOffset {
+	// If the viewport scrolled into a different hunk, re-derive currentHunkIdx
+	// so the highlight follows j/k/Ctrl-D/Ctrl-U scrolling.
+	if m.vp.YOffset() != m.lastYOffset && m.file != nil && len(m.file.hunkOffsets) > 0 {
 		m.lastYOffset = m.vp.YOffset()
-		newIdx := m.CurrentHunkIndex()
-		if newIdx >= 0 && newIdx != m.currentHunkIdx {
+		newIdx := m.hunkIndexForOffset(m.vp.YOffset())
+		if newIdx != m.currentHunkIdx {
 			m.currentHunkIdx = newIdx
 			m.refreshView()
 		}
@@ -471,35 +472,45 @@ func (m *Model) refreshView() {
 	m.vp.SetContent(rendered)
 }
 
-// NextHunk scrolls the viewport so the next hunk's header is at the top. Returns
-// true if the viewport was moved.
+// NextHunk advances currentHunkIdx and scrolls the viewport to show it.
 func (m *Model) NextHunk() bool {
 	if m.file == nil || len(m.file.hunkOffsets) == 0 {
 		return false
 	}
-	y := m.vp.YOffset()
-	for _, off := range m.file.hunkOffsets {
-		if off > y {
-			m.vp.SetYOffset(off)
-			return true
-		}
+	if m.currentHunkIdx >= len(m.file.hunkOffsets)-1 {
+		return false
 	}
-	return false
+	m.currentHunkIdx++
+	m.scrollToCurrentHunk()
+	m.refreshView()
+	return true
 }
 
-// PrevHunk scrolls the viewport so the previous hunk's header is at the top.
+// PrevHunk decrements currentHunkIdx and scrolls the viewport to show it.
 func (m *Model) PrevHunk() bool {
 	if m.file == nil || len(m.file.hunkOffsets) == 0 {
 		return false
 	}
-	y := m.vp.YOffset()
-	for i := len(m.file.hunkOffsets) - 1; i >= 0; i-- {
-		if m.file.hunkOffsets[i] < y {
-			m.vp.SetYOffset(m.file.hunkOffsets[i])
-			return true
-		}
+	if m.currentHunkIdx <= 0 {
+		return false
 	}
-	return false
+	m.currentHunkIdx--
+	m.scrollToCurrentHunk()
+	m.refreshView()
+	return true
+}
+
+// scrollToCurrentHunk positions the viewport at the current hunk's header.
+// SetYOffset clamps automatically when near end-of-content, which is fine —
+// the header will still be on screen.
+func (m *Model) scrollToCurrentHunk() {
+	if m.currentHunkIdx < 0 || m.currentHunkIdx >= len(m.file.hunkOffsets) {
+		return
+	}
+	m.vp.SetYOffset(m.file.hunkOffsets[m.currentHunkIdx])
+	// Sync so the Update loop doesn't override our explicit selection with the
+	// scroll-derived heuristic.
+	m.lastYOffset = m.vp.YOffset()
 }
 
 // TotalHunks returns the hunk count for the active file, or 0.
@@ -519,14 +530,24 @@ func (m Model) IsCurrentHunkReviewed() bool {
 	return m.reviewedMask[idx]
 }
 
-// CurrentHunkIndex returns the index of the topmost-passed hunk in the displayed
-// content (the hunk the user is currently reading). Returns -1 if not viewing a
-// single file or no hunk has been scrolled to yet.
+// CurrentHunkIndex returns the active hunk index. -1 if not viewing a single file.
 func (m Model) CurrentHunkIndex() int {
 	if m.file == nil || len(m.file.hunkOffsets) == 0 {
 		return -1
 	}
-	y := m.vp.YOffset()
+	if m.currentHunkIdx < 0 {
+		return 0
+	}
+	if m.currentHunkIdx >= len(m.file.hunkOffsets) {
+		return len(m.file.hunkOffsets) - 1
+	}
+	return m.currentHunkIdx
+}
+
+// hunkIndexForOffset returns the index of the topmost-passed hunk header for a
+// given viewport y-offset. Used to re-derive the active hunk when the user
+// scrolls with j/k/Ctrl-D/Ctrl-U (not ] / [).
+func (m Model) hunkIndexForOffset(y int) int {
 	idx := -1
 	for i, off := range m.file.hunkOffsets {
 		if off <= y+1 {
@@ -536,7 +557,7 @@ func (m Model) CurrentHunkIndex() int {
 		}
 	}
 	if idx < 0 {
-		return 0 // before the first hunk header — treat the first as current
+		return 0
 	}
 	return idx
 }
