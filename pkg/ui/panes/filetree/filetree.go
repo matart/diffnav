@@ -219,14 +219,61 @@ func (m *Model) SetReviewedLookup(fn func(file *gitdiff.File) (int, int)) {
 	m.rebuildTree()
 }
 
-// Refresh re-runs viewport population using the existing nodes. Call when a
-// FileNode's render-time data (e.g. the reviewed-hunk count) changed but the
-// tree structure didn't — preserves folder open/closed state and cursor.
+// Refresh rebuilds the tree to pick up changed render-time data (e.g. reviewed
+// counts) while preserving folder open/closed state and cursor position.
+// We can't reuse the existing root because bubbles/tree.SetNodes(sameRoot)
+// keeps prepending the open-folder indicator to the root each call.
 func (m *Model) Refresh() {
 	if m.t.Root() == nil {
 		return
 	}
-	m.t.SetNodes(m.t.Root())
+	closed := m.collectClosedDirPaths()
+	cursorPath := m.CurrNodePath()
+	m.rebuildTree()
+	m.applyClosedDirs(closed)
+	m.restoreCursorByPath(cursorPath)
+}
+
+// collectClosedDirPaths returns the FullPaths of every DirNode currently closed.
+func (m *Model) collectClosedDirPaths() map[string]bool {
+	closed := make(map[string]bool)
+	for _, node := range m.t.AllNodes() {
+		if dir, ok := node.GivenValue().(*dirnode.DirNode); ok && !node.IsOpen() {
+			closed[dir.FullPath] = true
+		}
+	}
+	return closed
+}
+
+func (m *Model) applyClosedDirs(closed map[string]bool) {
+	if len(closed) == 0 {
+		return
+	}
+	for _, node := range m.t.AllNodes() {
+		if dir, ok := node.GivenValue().(*dirnode.DirNode); ok && closed[dir.FullPath] {
+			node.Close()
+		}
+	}
+}
+
+func (m *Model) restoreCursorByPath(path string) {
+	if path == "" {
+		return
+	}
+	for _, node := range m.t.AllNodes() {
+		switch val := node.GivenValue().(type) {
+		case *filenode.FileNode:
+			if filenode.GetFileName(val.File) == path {
+				m.t.SetYOffset(node.YOffset())
+				return
+			}
+		case *dirnode.DirNode:
+			if val.FullPath == path {
+				m.t.SetYOffset(node.YOffset())
+				return
+			}
+		}
+	}
 }
 
 func (m *Model) rebuildTree() {
