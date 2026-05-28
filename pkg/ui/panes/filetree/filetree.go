@@ -211,12 +211,22 @@ func (m *Model) SetCursorByPath(path string) {
 	m.t.SetYOffset(yoffset)
 }
 
-// SetReviewedLookup sets the callback FileNodes consult at render time for
-// reviewed-hunk counts. The lookup is read on every render, so updating state
-// elsewhere takes effect without rebuilding the tree.
+// SetReviewedLookup sets the callback FileNodes consult for reviewed-hunk
+// counts. Triggers a full tree rebuild because the callback is wired into each
+// FileNode at construction time.
 func (m *Model) SetReviewedLookup(fn func(file *gitdiff.File) (int, int)) {
 	m.reviewedFn = fn
 	m.rebuildTree()
+}
+
+// Refresh re-runs viewport population using the existing nodes. Call when a
+// FileNode's render-time data (e.g. the reviewed-hunk count) changed but the
+// tree structure didn't — preserves folder open/closed state and cursor.
+func (m *Model) Refresh() {
+	if m.t.Root() == nil {
+		return
+	}
+	m.t.SetNodes(m.t.Root())
 }
 
 func (m *Model) rebuildTree() {

@@ -206,6 +206,7 @@ func (m *mainModel) toggleReviewedAtCursor() {
 		log.Warn("failed to save reviewed state", "err", err)
 	}
 	m.refreshReviewedMask()
+	m.fileTree.Refresh() // re-populate the tree viewport so the badge updates
 }
 
 type repoRootMsg string
@@ -432,6 +433,10 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case repoRootMsg:
 		m.repoRoot = string(msg)
+		// Rebind the file-tree lookup so its captured `m` has the correct
+		// repoRoot. Without this, the closure created in fileTreeMsg may have
+		// frozen an empty repoRoot if it arrived before this message.
+		m.fileTree.SetReviewedLookup(m.reviewedStatsForFile)
 		m.refreshReviewedMask()
 
 	case watchResultMsg:
