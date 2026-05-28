@@ -54,6 +54,9 @@ type Model struct {
 	reviewedMask   []bool // one bool per hunk in the current file (only used when file != nil)
 	currentHunkIdx int
 	lastYOffset    int
+	// pendingHunkIdx is the hunk to activate once the next diffContentMsg fills
+	// in hunkOffsets. -1 means no pending position.
+	pendingHunkIdx int
 }
 
 // SetPreamble stores the preamble text (e.g. commit metadata from git show).
@@ -63,9 +66,10 @@ func (m *Model) SetPreamble(preamble string) {
 
 func New(sideBySide bool) Model {
 	return Model{
-		vp:         viewport.Model{},
-		sideBySide: sideBySide,
-		cache:      map[string]*cachedNode{},
+		vp:             viewport.Model{},
+		sideBySide:     sideBySide,
+		cache:          map[string]*cachedNode{},
+		pendingHunkIdx: -1,
 	}
 }
 
@@ -87,6 +91,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		raw := strings.Join(lines, "\n")
 		mask := m.reviewedMask
 		currentIdx := m.currentHunkIdx
+		appliedPending := false
+		if m.cache[msg.cacheKey] != nil && m.file != nil && m.cache[msg.cacheKey] == m.file && m.pendingHunkIdx >= 0 {
+			// Pending hunk position set by mainModel before the diff was ready.
+			currentIdx = m.pendingHunkIdx
+			m.currentHunkIdx = m.pendingHunkIdx
+			m.pendingHunkIdx = -1
+			appliedPending = true
+		}
 		if m.cache[msg.cacheKey] == nil || m.file == nil || m.cache[msg.cacheKey] != m.file {
 			mask = nil
 			currentIdx = -1
@@ -98,6 +110,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			n.hunkOffsets = offsets
 		}
 		m.vp.SetContent(rendered)
+		if appliedPending {
+			m.scrollToCurrentHunk()
+		}
 	}
 
 	vp, vpCmd := m.vp.Update(msg)
@@ -256,6 +271,7 @@ func (m Model) SetFilePatch(file *gitdiff.File) (Model, tea.Cmd) {
 	m.dir = nil
 	m.currentHunkIdx = 0
 	m.lastYOffset = 0
+	m.pendingHunkIdx = -1
 
 	fname := filenode.GetFileName(file)
 	key := cacheKey(fname, m.sideBySide)
@@ -511,6 +527,35 @@ func (m *Model) scrollToCurrentHunk() {
 	// Sync so the Update loop doesn't override our explicit selection with the
 	// scroll-derived heuristic.
 	m.lastYOffset = m.vp.YOffset()
+}
+
+// SetCurrentHunkIndex positions the active hunk to idx. If the diff content
+// hasn't been rendered yet (no hunkOffsets), the position is stored as pending
+// and applied when the next diffContentMsg arrives. Negative idx is clamped to
+// 0; out-of-range idx is clamped to the last hunk.
+func (m *Model) SetCurrentHunkIndex(idx int) {
+	if m.file == nil || len(m.file.files) != 1 {
+		return
+	}
+	total := len(m.file.files[0].TextFragments)
+	if total == 0 {
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= total {
+		idx = total - 1
+	}
+	if len(m.file.hunkOffsets) > 0 {
+		m.currentHunkIdx = idx
+		m.scrollToCurrentHunk()
+		m.refreshView()
+		m.pendingHunkIdx = -1
+	} else {
+		m.pendingHunkIdx = idx
+		m.currentHunkIdx = idx
+	}
 }
 
 // TotalHunks returns the hunk count for the active file, or 0.

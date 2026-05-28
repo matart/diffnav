@@ -336,9 +336,22 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.ToggleReviewed):
 			m.toggleReviewedAtCursor()
 		case key.Matches(msg, keys.NextHunk):
-			m.diffViewer.NextHunk()
+			if !m.diffViewer.NextHunk() {
+				m, cmd = m.moveToFile(1)
+				cmds = append(cmds, cmd)
+				// First hunk is already 0 after SetFilePatch — nothing else to do.
+			}
 		case key.Matches(msg, keys.PrevHunk):
-			m.diffViewer.PrevHunk()
+			if !m.diffViewer.PrevHunk() {
+				m, cmd = m.moveToFile(-1)
+				cmds = append(cmds, cmd)
+				// Land on the last hunk of the previous file.
+				if file := m.diffViewer.CurrentFile(); file != nil {
+					if total := len(file.TextFragments); total > 0 {
+						m.diffViewer.SetCurrentHunkIndex(total - 1)
+					}
+				}
+			}
 		case key.Matches(msg, keys.ToggleDiffView):
 			m.sideBySide = !m.sideBySide
 			cmd = m.diffViewer.SetSideBySide(m.sideBySide)
